@@ -450,11 +450,51 @@ async def call_llm(
         if last_finish_reason == "length":
             print(f"[LLM-WARN] Stream ended with finish_reason='length' — output was likely truncated by max_tokens!", flush=True)
 
-        # If no tool calls, return final text
+        # If no tool calls, check for hallucination before returning
         if not tool_calls_data:
             # Strip <think>...</think> from final content (reasoning models)
             import re as _re
             full_content = _re.sub(r'<think>[\s\S]*?</think>\s*', '', full_content).strip()
+
+            # ── Hallucination guard ──
+            # Detect when the model claims to have completed an action (e.g. created a
+            # calendar event, wrote a document) without actually calling any tools.
+            # This is a known failure mode for some models (e.g. qwen-plus) that generate
+            # plausible-sounding "success" text instead of calling the tool.
+            _HALLUCINATION_PATTERNS = [
+                r'evt_[A-Za-z0-9]{8,}',           # fake Feishu event IDs
+                r'已成功创建.{0,20}(日历|日程|会议|事件)',
+                r'(日程|日历|事件|会议).{0,20}已.{0,5}(创建|添加|同步)',
+                r'doc_token["\s]*[:=]\s*["\']?[A-Za-z0-9_-]{10,}',  # fake doc tokens
+            ]
+            _tool_names_in_tools = {t["function"]["name"] for t in tools_for_llm}
+            _action_tools = {
+                "feishu_calendar_create", "feishu_calendar_update", "feishu_calendar_delete",
+                "feishu_doc_create", "feishu_doc_append", "send_feishu_message",
+                "write_file", "execute_code",
+            }
+            _has_action_tools = bool(_tool_names_in_tools & _action_tools)
+            _looks_like_hallucination = _has_action_tools and any(
+                _re.search(p, full_content) for p in _HALLUCINATION_PATTERNS
+            )
+            if _looks_like_hallucination and round_i < _max_tool_rounds - 1:
+                print(f"[LLM-WARN] Hallucination detected: model claimed success without calling tools. Injecting correction.", flush=True)
+                api_messages.append({"role": "assistant", "content": full_content})
+                api_messages.append({
+                    "role": "user",
+                    "content": (
+                        "[SYSTEM ERROR] Your previous response claimed to have completed an action "
+                        "but you did NOT call any tool. You have NOT created any event, document, "
+                        "or message — nothing happened. You MUST use the actual tool call mechanism. "
+                        "Please call the correct tool now with the parameters from the original request."
+                    ),
+                })
+                full_content = ""
+                tool_calls_data = []
+                last_finish_reason = None
+                _in_think = False
+                _tag_buffer = ""
+                continue  # retry with correction injected
             # Track token usage
             if agent_id:
                 try:

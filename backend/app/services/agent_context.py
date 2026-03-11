@@ -191,6 +191,40 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
     if role_description:
         parts.append(f"\n## Role\n{role_description}")
 
+    # --- Feishu Built-in Tools (injected BEFORE soul/memory so it overrides any conservative boundary) ---
+    parts.append("""
+## ⚡ Pre-installed Feishu Tools
+
+The following tools are available in your toolset. **You MUST call them via the tool-calling mechanism — NEVER describe or simulate their results in text.**
+
+🔴 **ABSOLUTE RULE**: If you have not received an actual tool call result, you have NOT performed the action. Never write "已创建", "已成功", "事件 ID 为 evt_..." or any claim of completion unless you have a REAL tool result to report.
+
+| Tool | Parameters |
+|------|-----------|
+| `feishu_user_search` | `name` — search a colleague by name → returns open_id, department. **Use this first** when you need to find a colleague. |
+| `feishu_calendar_create` | `summary`, `start_time`, `end_time` (ISO-8601 +08:00). No email needed. |
+| `feishu_calendar_list` | No required parameters. |
+| `feishu_calendar_update` | `event_id`, fields to update. |
+| `feishu_calendar_delete` | `event_id`. |
+| `feishu_doc_create` | `title`, optional `content`. |
+| `feishu_doc_read` | `doc_token`. |
+| `feishu_doc_append` | `doc_token`, `paragraphs`. |
+| `send_feishu_message` | `open_id` or `email`, `content`. |
+
+🚫 **NEVER:**
+- Use `discover_resources` or `import_mcp_server` for any Feishu tool above
+- Ask for user email or open_id when you can call `feishu_user_search` to look them up
+- Generate a `.ics` file instead of calling `feishu_calendar_create`
+- Write a success message without having received a tool result
+
+✅ **When user asks to message a colleague by name:**
+→ Just call `send_feishu_message(member_name="覃睿", message="...")` — it auto-searches.
+→ Or use `open_id` directly if you already have it from `feishu_user_search`.
+
+✅ **When user asks to invite a colleague to a calendar event:**
+→ Use `attendee_names=["覃睿"]` in `feishu_calendar_create` — names are resolved automatically.
+→ Or use `attendee_open_ids=["ou_xxx"]` if you already have the open_id.""")
+
     # --- Company Intro (from system settings) ---
     try:
         from app.database import async_session
@@ -314,25 +348,7 @@ You have a dedicated workspace with this structure:
 
 9. **Reply in the same language the user uses.**
 
-10. **Never assume a file exists — always verify with `list_files` first.**
-
-11. **Feishu built-in tools — call them DIRECTLY, no installation or authorization needed.**
-    These tools are pre-integrated and ready to use as long as this agent has a Feishu channel configured:
-    - `feishu_calendar_create` — Create a calendar event (title, start_time, end_time, attendee_emails, description, location)
-    - `feishu_calendar_list`   — List a user's upcoming calendar events
-    - `feishu_calendar_update` — Update an existing event
-    - `feishu_calendar_delete` — Delete / cancel an event
-    - `feishu_doc_create`      — Create a new Feishu Docx document (returns token + URL)
-    - `feishu_doc_read`        — Read the text content of a Feishu document by token
-    - `feishu_doc_append`      — Append paragraphs to an existing Feishu document
-    - `send_feishu_message`    — Send a Feishu IM message to a colleague in your relationships
-
-    ⚠️ FEISHU TOOL RULES:
-    - **NEVER call `discover_resources` or `import_mcp_server` for Feishu capabilities** — they are already built-in.
-    - **NEVER ask for extra authorization before calling Feishu calendar or document tools.** If the user (or a user identified in the conversation) requests a calendar event or document operation, call the tool immediately.
-    - When the user asks you to create a meeting / event on Feishu Calendar, call `feishu_calendar_create` directly. Use the requester's work email as `user_email` if known, or ask for it only if you genuinely have no way to infer it.
-    - If `user_email` is provided or clearly implied, **do not ask again** — just call the tool.
-    - The `start_time` and `end_time` parameters must be ISO 8601 with timezone offset, e.g. `2026-03-12T15:00:00+08:00`.""")
+10. **Never assume a file exists — always verify with `list_files` first.**""")
 
 
     # Inject current user identity
