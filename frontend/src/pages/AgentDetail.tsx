@@ -2360,7 +2360,16 @@ function AgentDetailInner() {
         fetchMySessions(false, id).then((data: any) => {
             if (currentAgentIdRef.current !== id) return;
             setSessionsLoading(false);
-            if (data && data.length > 0) selectSession(data[0], 'mine');
+            if (data && data.length > 0) {
+                // If the first session is already active, skip selectSession to
+                // preserve in-memory streaming content that hasn't been saved to DB yet.
+                const firstSess = data[0];
+                if (activeSession && String(activeSession.id) === String(firstSess.id)) {
+                    syncActiveSocketState(activeSession, id);
+                    return;
+                }
+                selectSession(firstSess, 'mine');
+            }
         });
     }, [id, token, activeTab, currentUser?.id]);
 
