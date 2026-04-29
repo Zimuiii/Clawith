@@ -389,9 +389,43 @@ async def _send_to_agent_background(
             )
             hist_msgs = list(reversed(hist_result.scalars().all()))
 
+            # Reconstitute tool_call records into assistant(tool_use) + tool(tool_result) pairs
+            # (same logic as websocket.py history reconstruction)
             messages = []
             for h in hist_msgs:
-                messages.append({"role": h.role, "content": h.content or ""})
+                if h.role == "tool_call":
+                    try:
+                        import json as _j_gw
+                        tc_data = _j_gw.loads(h.content)
+                        tc_name = tc_data.get("name", "unknown")
+                        tc_args = tc_data.get("args", {})
+                        tc_result = tc_data.get("result", "")
+                        tc_id = f"call_{h.id}"
+                        asst_entry = {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": tc_id,
+                                "type": "function",
+                                "function": {"name": tc_name, "arguments": _j_gw.dumps(tc_args, ensure_ascii=False)},
+                            }],
+                        }
+                        if tc_data.get("reasoning_content"):
+                            asst_entry["reasoning_content"] = tc_data["reasoning_content"]
+                        messages.append(asst_entry)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": str(tc_result)[:500],
+                        })
+                    except Exception:
+                        continue
+                else:
+                    entry = {"role": h.role, "content": h.content or ""}
+                    # Map DB "thinking" field to "reasoning_content" for LLMMessage compatibility
+                    if hasattr(h, 'thinking') and h.thinking:
+                        entry["reasoning_content"] = h.thinking
+                    messages.append(entry)
 
             # Add the new message with agent communication context
             user_msg = f"{agent_comm_alert}\n\n[Message from agent: {source_agent_name}]\n{content}"
@@ -421,7 +455,7 @@ async def _send_to_agent_background(
         async def on_chunk(text):
             collected.append(text)
 
-        reply = await call_llm(
+        _llm_result = await call_llm(
             model=model,
             messages=messages,
             agent_name=target_agent_name,
@@ -431,7 +465,7 @@ async def _send_to_agent_background(
             session_id=conv_id,
             on_chunk=on_chunk,
         )
-        final_reply = reply or "".join(collected)
+        final_reply = _llm_result.content or "".join(collected)
 
         # Save assistant reply to conversation
         async with async_session() as db:

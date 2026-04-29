@@ -195,7 +195,7 @@ def _build_llm_history_from_chat_messages(history_messages: list) -> list[dict]:
             tool_result = payload.get("result") or ""
             call_id = payload.get("tool_call_id") or f"feishu-tool-{msg.id}"
 
-            history.append({
+            asst_entry = {
                 "role": "assistant",
                 "content": None,
                 "tool_calls": [{
@@ -206,7 +206,10 @@ def _build_llm_history_from_chat_messages(history_messages: list) -> list[dict]:
                         "arguments": _json.dumps(tool_args, ensure_ascii=False) if isinstance(tool_args, dict) else str(tool_args),
                     },
                 }],
-            })
+            }
+            if payload.get("reasoning_content"):
+                asst_entry["reasoning_content"] = payload["reasoning_content"]
+            history.append(asst_entry)
             history.append({
                 "role": "tool",
                 "tool_call_id": call_id,
@@ -214,7 +217,11 @@ def _build_llm_history_from_chat_messages(history_messages: list) -> list[dict]:
             })
             continue
 
-        history.append({"role": msg.role, "content": msg.content})
+        entry = {"role": msg.role, "content": msg.content}
+        # Map DB "thinking" field to "reasoning_content" for LLMMessage compatibility
+        if hasattr(msg, 'thinking') and msg.thinking:
+            entry["reasoning_content"] = msg.thinking
+        history.append(entry)
     return history
 
 
@@ -1644,7 +1651,7 @@ async def _call_agent_llm(
     _timeout = _get_llm_timeout(model)
 
     try:
-        reply = await asyncio.wait_for(
+        _llm_result = await asyncio.wait_for(
             call_llm(
                 model,
                 messages,
@@ -1660,7 +1667,7 @@ async def _call_agent_llm(
             ),
             timeout=_timeout,
         )
-        return reply
+        return _llm_result.content
     except asyncio.TimeoutError:
         logger.error(
             f"[LLM] Call timed out after {_timeout}s "
@@ -1671,7 +1678,7 @@ async def _call_agent_llm(
             _fb_timeout = _get_llm_timeout(fallback_model)
             logger.info(f"[LLM] Retrying timed-out request with fallback model: {fallback_model.model} (timeout={_fb_timeout}s)")
             try:
-                reply = await asyncio.wait_for(
+                _fb_result = await asyncio.wait_for(
                     call_llm(
                         fallback_model,
                         messages,
@@ -1687,7 +1694,7 @@ async def _call_agent_llm(
                     ),
                     timeout=_fb_timeout,
                 )
-                return reply
+                return _fb_result.content
             except asyncio.TimeoutError:
                 logger.error(
                     f"[LLM] Fallback call also timed out after {_fb_timeout}s "
@@ -1709,7 +1716,7 @@ async def _call_agent_llm(
             logger.info(f"[LLM] Retrying with fallback model: {fallback_model.model}")
             try:
                 _fb_timeout = _get_llm_timeout(fallback_model)
-                reply = await asyncio.wait_for(
+                _fb_result = await asyncio.wait_for(
                     call_llm(
                         fallback_model,
                         messages,
@@ -1725,7 +1732,7 @@ async def _call_agent_llm(
                     ),
                     timeout=_fb_timeout,
                 )
-                return reply
+                return _fb_result.content
             except asyncio.TimeoutError:
                 logger.error(
                     f"[LLM] Fallback call timed out after {_fb_timeout}s "

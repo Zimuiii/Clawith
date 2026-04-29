@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,16 @@ TOOLS_REQUIRING_ARGS = frozenset({
     "write_file", "read_file", "delete_file", "read_document",
     "send_message_to_agent", "send_feishu_message", "send_email"
 })
+
+
+@dataclass
+class LLMResult:
+    """Result from call_llm, including intermediate tool messages for conversation tracking."""
+    content: str
+    tool_messages: list[dict] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        return self.content
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -297,12 +308,22 @@ async def call_llm(
     on_thinking=None,
     supports_vision=False,
     max_tool_rounds_override: int | None = None,
-) -> str:
-    """Call LLM via unified client with function-calling tool loop."""
+) -> LLMResult:
+    """Call LLM via unified client with function-calling tool loop.
+
+    Returns LLMResult with:
+      - content: the final text response
+      - tool_messages: intermediate assistant(tool_use) + tool(tool_result) pairs
+        produced during the tool-calling loop. Callers that maintain a conversation
+        list should append these to keep the message structure valid for the next LLM call.
+    """
+    # Track intermediate tool messages for conversation integrity
+    _tool_messages: list[dict] = []
+
     # Get agent config for tool rounds
     _max_tool_rounds, _token_limit_msg = await _get_agent_config(agent_id)
     if _token_limit_msg:
-        return _token_limit_msg
+        return LLMResult(content=_token_limit_msg)
     if max_tool_rounds_override and max_tool_rounds_override < _max_tool_rounds:
         _max_tool_rounds = max_tool_rounds_override
 
@@ -325,6 +346,7 @@ async def call_llm(
             content=msg.get("content"),
             tool_calls=msg.get("tool_calls"),
             tool_call_id=msg.get("tool_call_id"),
+            reasoning_content=msg.get("reasoning_content"),
         ))
 
     # Vision format conversion
@@ -340,7 +362,7 @@ async def call_llm(
             timeout=_get_model_timeout(model),
         )
     except Exception as e:
-        return f"[Error] Failed to create LLM client: {e}"
+        return LLMResult(content=f"[Error] Failed to create LLM client: {e}")
 
     max_tokens = get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None))
     _accumulated_tokens = 0
@@ -381,13 +403,13 @@ async def call_llm(
             if agent_id and _accumulated_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_tokens)
             await client.close()
-            return f"[LLM Error] {e}"
+            return LLMResult(content=f"[LLM Error] {e}")
         except Exception as e:
             logger.exception(f"[LLM] Unexpected error: {type(e).__name__}: {str(e)[:300]}")
             if agent_id and _accumulated_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_tokens)
             await client.close()
-            return f"[LLM call error] {type(e).__name__}: {str(e)[:200]}"
+            return LLMResult(content=f"[LLM call error] {type(e).__name__}: {str(e)[:200]}")
 
         # Track tokens for this round
         real_tokens = extract_usage_tokens(response.usage)
@@ -402,12 +424,23 @@ async def call_llm(
             if agent_id and _accumulated_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_tokens)
             await client.close()
-            return response.content or "[LLM returned empty content]"
+            return LLMResult(content=response.content or "[LLM returned empty content]", tool_messages=_tool_messages)
 
         # Execute tool calls
         logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
 
-        # Add assistant message with tool calls
+        # Add assistant message with tool calls — record for conversation tracking
+        _assistant_msg = {
+            "role": "assistant",
+            "content": response.content or None,
+            "tool_calls": [{
+                "id": tc["id"],
+                "type": "function",
+                "function": tc["function"],
+            } for tc in response.tool_calls],
+        }
+        if response.reasoning_content:
+            _assistant_msg["reasoning_content"] = response.reasoning_content
         api_messages.append(LLMMessage(
             role="assistant",
             content=response.content or None,
@@ -418,6 +451,7 @@ async def call_llm(
             } for tc in response.tool_calls],
             reasoning_content=response.reasoning_content,
         ))
+        _tool_messages.append(_assistant_msg)
 
         full_reasoning_content = response.reasoning_content or ""
 
@@ -438,12 +472,18 @@ async def call_llm(
                     content=tool_error,
                     tool_call_id=tc.get("id", ""),
                 ))
+                # Also record error tool result for conversation tracking
+                _tool_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": tool_error,
+                })
 
     # Record tokens even on "too many rounds" exit
     if agent_id and _accumulated_tokens > 0:
         await record_token_usage(agent_id, _accumulated_tokens)
     await client.close()
-    return "[Error] Too many tool call rounds"
+    return LLMResult(content="[Error] Too many tool call rounds", tool_messages=_tool_messages)
 
 
 async def call_llm_with_failover(
@@ -461,8 +501,11 @@ async def call_llm_with_failover(
     on_tool_delta=None,
     supports_vision=False,
     on_failover=None,
-) -> str:
-    """Call LLM with automatic failover support."""
+) -> LLMResult:
+    """Call LLM with automatic failover support.
+
+    Returns LLMResult with content and tool_messages (see call_llm).
+    """
     guard = FailoverGuard()
 
     # Config-level fallback: if no primary, use fallback directly
@@ -472,7 +515,7 @@ async def call_llm_with_failover(
         fallback_model = None
 
     if primary_model is None:
-        return "⚠️ 未配置 LLM 模型"
+        return LLMResult(content="⚠️ 未配置 LLM 模型")
 
     # Wrapper callbacks to track state for guard checks
     async def _wrapped_on_chunk(text: str):
@@ -503,8 +546,8 @@ async def call_llm_with_failover(
     )
 
     # Check if we need to failover
-    if not is_retryable_error(primary_result):
-        logger.warning(f"[Failover] Canceled: Primary model returned a non-retryable error: {primary_result[:150]}")
+    if not is_retryable_error(primary_result.content):
+        # Normal response (not an error) — no failover needed
         return primary_result
 
     # Check guard conditions
@@ -564,8 +607,11 @@ async def call_llm_with_failover(
     )
 
     # Combine error messages if fallback also failed
-    if is_retryable_error(fallback_result) or fallback_result.startswith("⚠️") or fallback_result.startswith("[Error]"):
-        return f"⚠️ 调用模型出错: Primary: {primary_result[:80]} | Fallback: {fallback_result[:80]}"
+    if is_retryable_error(fallback_result.content) or fallback_result.content.startswith("⚠️") or fallback_result.content.startswith("[Error]"):
+        return LLMResult(
+            content=f"⚠️ 调用模型出错: Primary: {primary_result.content[:80]} | Fallback: {fallback_result.content[:80]}",
+            tool_messages=fallback_result.tool_messages,
+        )
 
     return fallback_result
 
@@ -628,7 +674,7 @@ async def call_agent_llm(
 
     # Use unified call_llm_with_failover
     try:
-        reply = await call_llm_with_failover(
+        result = await call_llm_with_failover(
             primary_model=primary_model,
             fallback_model=fallback_model,
             messages=messages,
@@ -641,7 +687,7 @@ async def call_agent_llm(
             on_thinking=on_thinking,
             supports_vision=supports_vision or getattr(primary_model, 'supports_vision', False),
         )
-        return reply
+        return result.content
     except Exception as e:
         error_msg = str(e) or repr(e)
         logger.error(f"[call_agent_llm] Unexpected error: {error_msg}")

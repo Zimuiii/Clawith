@@ -364,7 +364,8 @@ async def websocket_chat(
         else:
             entry = {"role": msg.role, "content": msg.content}
             if hasattr(msg, 'thinking') and msg.thinking:
-                entry["thinking"] = msg.thinking
+                # Map DB "thinking" field to "reasoning_content" for LLMMessage compatibility
+                entry["reasoning_content"] = msg.thinking
             conversation.append(entry)
 
     try:
@@ -719,9 +720,12 @@ async def websocket_chat(
                             assistant_response = partial_text + "\n\n*[Generation stopped]*"
                         else:
                             assistant_response = "*[Generation stopped]*"
+                        _llm_tool_messages = []
                         logger.info(f"[WS] LLM aborted, partial: {assistant_response[:80]}")
                     else:
-                        assistant_response = await llm_task
+                        _llm_result = await llm_task
+                        assistant_response = _llm_result.content
+                        _llm_tool_messages = _llm_result.tool_messages
                         logger.info(f"[WS] LLM response: {assistant_response[:80]}")
 
                     # call_llm returns error strings instead of raising — detect and
@@ -731,6 +735,13 @@ async def websocket_chat(
                         assistant_response.startswith(p) for p in _LLM_ERROR_PREFIXES
                     ):
                         raise RuntimeError(assistant_response)
+
+                    # Append intermediate tool messages to conversation so the next
+                    # LLM call sees the correct assistant(tool_use) → tool(tool_result)
+                    # structure. Without this, models like DeepSeek reject the request
+                    # with "tool_use ids were found without tool_result blocks".
+                    if _llm_tool_messages:
+                        conversation.extend(_llm_tool_messages)
 
                     # Update last_active_at
                     from datetime import datetime, timezone as tz

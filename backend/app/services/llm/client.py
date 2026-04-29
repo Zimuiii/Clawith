@@ -1461,7 +1461,22 @@ class AnthropicClient(LLMClient):
             else:
                 formatted = msg.to_anthropic_format()
                 if formatted:
-                    anthropic_messages.append(formatted)
+                    # Anthropic API requires all tool_results for a single assistant
+                    # tool_use message to be in the SAME user message. Merge
+                    # consecutive tool_result user messages into one.
+                    if (formatted["role"] == "user"
+                            and isinstance(formatted.get("content"), list)
+                            and formatted["content"]
+                            and formatted["content"][0].get("type") == "tool_result"
+                            and anthropic_messages
+                            and anthropic_messages[-1]["role"] == "user"
+                            and isinstance(anthropic_messages[-1].get("content"), list)
+                            and anthropic_messages[-1]["content"]
+                            and anthropic_messages[-1]["content"][0].get("type") == "tool_result"):
+                        # Merge into previous user message
+                        anthropic_messages[-1]["content"].extend(formatted["content"])
+                    else:
+                        anthropic_messages.append(formatted)
 
         # In Anthropic prompt caching, we also want to cache_control the last user message
         # So we add cache_control to the very last message in the history if it's a user message

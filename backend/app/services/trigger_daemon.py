@@ -782,7 +782,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             except Exception as e:
                 logger.warning(f"Failed to persist tool call for trigger session: {e}")
 
-        reply = await call_llm(
+        _llm_result = await call_llm(
             model=model,
             messages=messages,
             agent_name=agent.name,
@@ -794,6 +794,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             on_tool_call=on_tool_call,
             # A2A wake uses the agent's own max_tool_rounds setting (no override)
         )
+        reply = _llm_result.content
 
         # Save assistant reply to Reflection session
         async with async_session() as db:

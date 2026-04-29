@@ -9,16 +9,20 @@ This module provides:
 Example:
     from app.services.llm import call_llm, call_llm_with_failover
 
-    # Basic call
-    reply = await call_llm(model, messages, agent_name, role_description)
+    # Basic call (returns LLMResult with .content and .tool_messages)
+    result = await call_llm(model, messages, agent_name, role_description)
+    reply = result.content  # the text response
 
     # With failover
-    reply = await call_llm_with_failover(
+    result = await call_llm_with_failover(
         primary_model=primary,
         fallback_model=fallback,
         messages=messages,
         ...
     )
+    reply = result.content
+    # result.tool_messages contains intermediate assistant(tool_use) + tool(tool_result)
+    # pairs that should be appended to the conversation list for message structure integrity.
 """
 
 from .caller import (
@@ -28,6 +32,7 @@ from .caller import (
     call_agent_llm_with_tools,
     FailoverGuard,
     is_retryable_error,
+    LLMResult,
 )
 from .client import LLMClient, LLMResponse, LLMError, LLMMessage
 from .failover import classify_error, FailoverErrorType
@@ -49,6 +54,7 @@ __all__ = [
     "LLMResponse",
     "LLMError",
     "LLMMessage",
+    "LLMResult",
     # Utilities
     "create_llm_client",
     "get_max_tokens",
