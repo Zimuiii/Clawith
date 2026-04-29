@@ -665,8 +665,12 @@ async def websocket_chat(
 
                         # To prevent tool call message pairs(assistant + tool) from being broken down.
                         _truncated = conversation[-ctx_size:]
+                        # Strip leading tool messages (orphaned tool_results)
                         while _truncated and _truncated[0].get("role") == "tool":
                             _truncated.pop(0)
+                        # Strip trailing assistant messages with tool_use but no matching tool_result
+                        while _truncated and _truncated[-1].get("role") == "assistant" and _truncated[-1].get("tool_calls"):
+                            _truncated.pop()
 
                         return await call_llm_with_failover(
                             primary_model=llm_model,

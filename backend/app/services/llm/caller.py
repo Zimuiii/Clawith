@@ -213,6 +213,7 @@ async def _process_tool_call(
     supports_vision: bool,
     on_tool_call,
     full_reasoning_content: str,
+    _tool_messages: list | None = None,
 ) -> str:
     """Process a single tool call and return result."""
     fn = tc["function"]
@@ -228,6 +229,13 @@ async def _process_tool_call(
     # Guard: check if tool requires arguments
     should_execute, error_msg = _check_tool_requires_args(tool_name, args)
     if not should_execute:
+        # Record error tool result for conversation tracking
+        if _tool_messages is not None:
+            _tool_messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": error_msg,
+            })
         return error_msg
 
     # Notify client about tool call (in-progress)
@@ -286,6 +294,13 @@ async def _process_tool_call(
         tool_call_id=tc["id"],
         content=tool_content,
     ))
+    # Record tool result for conversation tracking (both success and error)
+    if _tool_messages is not None:
+        _tool_messages.append({
+            "role": "tool",
+            "tool_call_id": tc["id"],
+            "content": str(tool_content) if not isinstance(tool_content, str) else tool_content,
+        })
     return ""
 
 
@@ -465,6 +480,7 @@ async def call_llm(
                 supports_vision=supports_vision,
                 on_tool_call=on_tool_call,
                 full_reasoning_content=full_reasoning_content,
+                _tool_messages=_tool_messages,
             )
             if tool_error:
                 api_messages.append(LLMMessage(
@@ -472,12 +488,6 @@ async def call_llm(
                     content=tool_error,
                     tool_call_id=tc.get("id", ""),
                 ))
-                # Also record error tool result for conversation tracking
-                _tool_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.get("id", ""),
-                    "content": tool_error,
-                })
 
     # Record tokens even on "too many rounds" exit
     if agent_id and _accumulated_tokens > 0:
