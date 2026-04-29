@@ -517,7 +517,10 @@ async def websocket_chat(
                     async def stream_to_ws(text: str):
                         """Send each chunk to client in real-time."""
                         partial_chunks.append(text)
-                        await websocket.send_json({"type": "chunk", "content": text})
+                        try:
+                            await websocket.send_json({"type": "chunk", "content": text})
+                        except Exception:
+                            pass  # WebSocket closed; chunks already in partial_chunks
                     
                     async def tool_call_to_ws(data: dict):
                         """Send tool call info to client and persist completed ones."""
@@ -661,7 +664,10 @@ async def websocket_chat(
                     # Run call_llm_with_failover as a cancellable task
                     async def _call_with_failover():
                         async def _on_failover(reason: str):
-                            await websocket.send_json({"type": "info", "content": f"Primary model error, {reason}"})
+                            try:
+                                await websocket.send_json({"type": "info", "content": f"Primary model error, {reason}"})
+                            except Exception:
+                                pass
 
                         # To prevent tool call message pairs(assistant + tool) from being broken down.
                         _truncated = conversation[-ctx_size:]
@@ -693,6 +699,7 @@ async def websocket_chat(
 
                     # Listen for abort while LLM is running
                     aborted = False
+                    _disconnected_during_llm = False
                     queued_messages: list[dict] = []
                     while not llm_task.done():
                         try:
@@ -710,10 +717,40 @@ async def websocket_chat(
                         except _aio.TimeoutError:
                             continue
                         except WebSocketDisconnect:
-                            llm_task.cancel()
-                            raise
+                            # Don't cancel LLM task — let it complete and save
+                            # to DB so the full response is available on reconnect.
+                            logger.info(f"[WS] Client disconnected during LLM, letting task complete in background")
+                            _disconnected_during_llm = True
+                            break
 
-                    if aborted:
+                    if _disconnected_during_llm:
+                        # Client disconnected — let LLM task finish in background.
+                        # The task's callbacks (stream_to_ws, tool_call_to_ws) already
+                        # handle closed WebSocket gracefully. When complete, the full
+                        # response is in DB for the client to pick up on reconnect.
+                        async def _save_background_result():
+                            try:
+                                _bg_result = await llm_task
+                                _bg_text = _bg_result.content or ""
+                                _bg_tool_msgs = _bg_result.tool_messages or []
+                                if _bg_text.strip():
+                                    async with async_session() as _db:
+                                        from app.models.chat_message import ChatMessage as CM
+                                        _msg = CM(
+                                            session_id=conv_id,
+                                            role="assistant",
+                                            content=_bg_text,
+                                            tool_calls=json.dumps(_bg_tool_msgs) if _bg_tool_msgs else None,
+                                        )
+                                        _db.add(_msg)
+                                        await _db.commit()
+                                    logger.info(f"[WS] Background LLM completed, saved {len(_bg_text)} chars to DB")
+                            except Exception as _e:
+                                logger.warning(f"[WS] Background LLM task failed: {_e}")
+
+                        _aio.create_task(_save_background_result())
+                        raise WebSocketDisconnect
+                    elif aborted:
                         # Wait for task to finish cancelling
                         try:
                             await llm_task
