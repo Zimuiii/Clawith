@@ -46,6 +46,7 @@ class LLMResult:
     """Result from call_llm, including intermediate tool messages for conversation tracking."""
     content: str
     tool_messages: list[dict] = field(default_factory=list)
+    reasoning_signature: str | None = None
 
     def __str__(self) -> str:
         return self.content
@@ -213,6 +214,7 @@ async def _process_tool_call(
     supports_vision: bool,
     on_tool_call,
     full_reasoning_content: str,
+    full_reasoning_signature: str = "",
     _tool_messages: list | None = None,
 ) -> str:
     """Process a single tool call and return result."""
@@ -246,7 +248,8 @@ async def _process_tool_call(
                 "call_id": tc.get("id", ""),
                 "args": args,
                 "status": "running",
-                "reasoning_content": full_reasoning_content
+                "reasoning_content": full_reasoning_content,
+                "reasoning_signature": full_reasoning_signature
             })
         except Exception:
             pass
@@ -284,7 +287,8 @@ async def _process_tool_call(
                 "args": args,
                 "status": "done",
                 "result": result,
-                "reasoning_content": full_reasoning_content
+                "reasoning_content": full_reasoning_content,
+                "reasoning_signature": full_reasoning_signature
             })
         except Exception:
             pass
@@ -439,7 +443,7 @@ async def call_llm(
             if agent_id and _accumulated_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_tokens)
             await client.close()
-            return LLMResult(content=response.content or "[LLM returned empty content]", tool_messages=_tool_messages)
+            return LLMResult(content=response.content or "[LLM returned empty content]", tool_messages=_tool_messages, reasoning_signature=response.reasoning_signature)
 
         # Execute tool calls
         logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
@@ -456,6 +460,8 @@ async def call_llm(
         }
         if response.reasoning_content:
             _assistant_msg["reasoning_content"] = response.reasoning_content
+        if response.reasoning_signature:
+            _assistant_msg["reasoning_signature"] = response.reasoning_signature
         api_messages.append(LLMMessage(
             role="assistant",
             content=response.content or None,
@@ -465,10 +471,12 @@ async def call_llm(
                 "function": tc["function"],
             } for tc in response.tool_calls],
             reasoning_content=response.reasoning_content,
+            reasoning_signature=response.reasoning_signature,
         ))
         _tool_messages.append(_assistant_msg)
 
         full_reasoning_content = response.reasoning_content or ""
+        full_reasoning_signature = response.reasoning_signature or ""
 
         for tc in response.tool_calls:
             tool_error = await _process_tool_call(
@@ -480,6 +488,7 @@ async def call_llm(
                 supports_vision=supports_vision,
                 on_tool_call=on_tool_call,
                 full_reasoning_content=full_reasoning_content,
+                full_reasoning_signature=full_reasoning_signature,
                 _tool_messages=_tool_messages,
             )
             if tool_error:

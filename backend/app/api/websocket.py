@@ -350,6 +350,8 @@ async def websocket_chat(
                 }
                 if tc_data.get("reasoning_content"):
                     asst_msg["reasoning_content"] = tc_data["reasoning_content"]
+                if tc_data.get("reasoning_signature"):
+                    asst_msg["reasoning_signature"] = tc_data["reasoning_signature"]
                 conversation.append(asst_msg)
                 # Tool result message.
                 from app.services.vision_inject import sanitize_history_tool_result
@@ -366,6 +368,8 @@ async def websocket_chat(
             if hasattr(msg, 'thinking') and msg.thinking:
                 # Map DB "thinking" field to "reasoning_content" for LLMMessage compatibility
                 entry["reasoning_content"] = msg.thinking
+            if hasattr(msg, 'thinking_signature') and msg.thinking_signature:
+                entry["reasoning_signature"] = msg.thinking_signature
             conversation.append(entry)
 
     try:
@@ -481,6 +485,7 @@ async def websocket_chat(
 
             # Track thinking content for storage (initialize before condition)
             thinking_content = []
+            thinking_signature = None
 
             # Reload model config on every message so Settings changes take effect
             # immediately without requiring a page refresh / WebSocket reconnect.
@@ -597,6 +602,7 @@ async def websocket_chat(
                                             "status": "done",
                                             "result": (data.get("result") or "")[:500],
                                             "reasoning_content": data.get("reasoning_content"),
+                                            "reasoning_signature": data.get("reasoning_signature"),
                                         }),
                                         conversation_id=conv_id,
                                     )
@@ -767,6 +773,7 @@ async def websocket_chat(
                         _llm_result = await llm_task
                         assistant_response = _llm_result.content
                         _llm_tool_messages = _llm_result.tool_messages
+                        thinking_signature = _llm_result.reasoning_signature
                         logger.info(f"[WS] LLM response: {assistant_response[:80]}")
 
                     # call_llm returns error strings instead of raising — detect and
@@ -846,6 +853,8 @@ async def websocket_chat(
             _assistant_entry = {"role": "assistant", "content": assistant_response}
             if thinking_content:
                 _assistant_entry["reasoning_content"] = "".join(thinking_content)
+            if thinking_signature:
+                _assistant_entry["reasoning_signature"] = thinking_signature
             conversation.append(_assistant_entry)
 
             # Save assistant reply
@@ -857,6 +866,7 @@ async def websocket_chat(
                     content=assistant_response,
                     conversation_id=conv_id,
                     thinking="".join(thinking_content) if thinking_content else None,
+                    thinking_signature=thinking_signature,
                 )
                 db.add(assistant_msg)
                 await maybe_mark_session_read_for_active_viewer(
