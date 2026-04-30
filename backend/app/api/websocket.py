@@ -842,7 +842,11 @@ async def websocket_chat(
                         logger.error(f"[WS] Task creation failed: {te}")
 
             # Add assistant response to in-memory conversation for subsequent turns.
-            conversation.append({"role": "assistant", "content": assistant_response})
+            # Include reasoning_content (thinking) so DeepSeek API accepts the history.
+            _assistant_entry = {"role": "assistant", "content": assistant_response}
+            if thinking_content:
+                _assistant_entry["reasoning_content"] = "".join(thinking_content)
+            conversation.append(_assistant_entry)
 
             # Save assistant reply
             async with async_session() as db:
