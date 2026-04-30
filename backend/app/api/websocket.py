@@ -348,9 +348,9 @@ async def websocket_chat(
                         "function": {"name": tc_name, "arguments": _j_hist.dumps(tc_args, ensure_ascii=False)},
                     }],
                 }
-                if tc_data.get("reasoning_content"):
+                # Only include thinking if we have both content and signature
+                if tc_data.get("reasoning_content") and tc_data.get("reasoning_signature"):
                     asst_msg["reasoning_content"] = tc_data["reasoning_content"]
-                if tc_data.get("reasoning_signature"):
                     asst_msg["reasoning_signature"] = tc_data["reasoning_signature"]
                 conversation.append(asst_msg)
                 # Tool result message.
@@ -365,10 +365,10 @@ async def websocket_chat(
                 continue  # Skip malformed tool_call records
         else:
             entry = {"role": msg.role, "content": msg.content}
-            if hasattr(msg, 'thinking') and msg.thinking:
-                # Map DB "thinking" field to "reasoning_content" for LLMMessage compatibility
+            # Only include thinking if we have the matching signature —
+            # without a valid signature DeepSeek rejects the request.
+            if hasattr(msg, 'thinking') and msg.thinking and hasattr(msg, 'thinking_signature') and msg.thinking_signature:
                 entry["reasoning_content"] = msg.thinking
-            if hasattr(msg, 'thinking_signature') and msg.thinking_signature:
                 entry["reasoning_signature"] = msg.thinking_signature
             conversation.append(entry)
 
